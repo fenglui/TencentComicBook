@@ -4,6 +4,8 @@ from reportlab.lib.pagesizes import A4, portrait
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
 
+from . import ensure_file_dir_exists
+
 
 def imgs_to_pdf(img_path_list, target_path):
     """将一组图片合成一个pdf文件
@@ -29,7 +31,7 @@ def imgs_to_pdf(img_path_list, target_path):
             top_margin = 0
         c.drawImage(img_path, left_margin, top_margin, img_w * ratio, img_h * ratio)
         c.showPage()
-    os.makedirs(os.path.dirname(target_path), exist_ok=True)
+    ensure_file_dir_exists(target_path)
     c.save()
     return target_path
 
@@ -41,7 +43,7 @@ def image_dir_to_pdf(img_dir, target_path, sort_by=None):
     :param func sort_by: 排序依据，如按文件名数字大小排序 sort_by=lambda x: int(x.split('.')[0])
     :return str target_path: 输出文件路径
     """
-    allow_image_suffix = ('jpg', 'jpeg', 'png', 'gif')
+    allow_image_suffix = ('jpg', 'jpeg', 'png', 'gif', 'webp')
     img_path_list = sorted(os.listdir(img_dir), key=sort_by)
     img_path_list = list(filter(lambda x: x.lower() not in allow_image_suffix, img_path_list))
     img_path_list = [os.path.join(img_dir, i)for i in img_path_list]

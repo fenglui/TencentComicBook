@@ -4,12 +4,18 @@ import logging
 
 from .comicbook import ComicBook
 from .crawlerbase import CrawlerBase
-from .image_cache import image_cache
-from .utils import parser_chapter_str
+from .utils import (
+    parser_chapter_str,
+    ensure_file_dir_exists
+)
+from .session import SessionMgr
+from .image import WorkerPoolMgr
 from .utils.mail import Mail
 from . import VERSION
 
 logger = logging.getLogger(__name__)
+HERE = os.path.abspath(os.path.dirname(__file__))
+DEFAULT_DOWNLOAD_DIR = os.path.abspath(os.path.join(HERE, os.path.pardir, 'download'))
 
 
 def parse_args():
@@ -52,6 +58,9 @@ def parse_args():
 
     parser.add_argument('--pdf', action='store_true',
                         help="是否生成pdf文件, 如 --pdf")
+    parser.add_argument('--single-image', action='store_true',
+                        help="是否拼接成一张图片, 如 --single-image")
+    parser.add_argument('--quality', type=int, default=95, help="生成长图的图片质量")
 
     parser.add_argument('--login', action='store_true',
                         help="是否登录账号，如 --login")
@@ -63,17 +72,11 @@ def parse_args():
     parser.add_argument('--config', default="config.ini",
                         help="配置文件路径，默认取当前目录下的config.ini")
 
-    parser.add_argument('-o', '--output', type=str, default='./download',
+    parser.add_argument('-o', '--output', type=str, default=DEFAULT_DOWNLOAD_DIR,
                         help="文件保存路径，默认保存在当前路径下的download文件夹")
     support_site = ComicBook.CRAWLER_CLS_MAP.keys()
     parser.add_argument('--site', type=str, default='qq', choices=support_site,
                         help="数据源网站：支持{}".format(','.join(sorted(support_site))))
-
-    parser.add_argument('--cachedir', type=str, default='./.cache',
-                        help="图片缓存目录，默认为当前目录下.cache")
-
-    parser.add_argument('--nocache', action='store_true',
-                        help="禁用图片缓存")
 
     parser.add_argument('--noverify', action='store_true',
                         help="noverify")
@@ -88,6 +91,10 @@ def parse_args():
                         )
 
     parser.add_argument('--session-path', type=str, help="读取或保存上次使用的session路径")
+    parser.add_argument('--cookies-path', type=str, help="读取或保存上次使用的cookies路径")
+
+    parser.add_argument('--proxy', type=str,
+                        help='设置代理，如 --proxy "socks5://user:pass@host:port"')
 
     parser.add_argument('-V', '--version', action='version', version=VERSION)
     parser.add_argument('--debug', action='store_true', help="debug")
@@ -98,10 +105,10 @@ def parse_args():
 
 def init_logger(level=None):
     level = level or logging.INFO
-    logger = logging.getLogger(__name__)
+    logger = logging.getLogger()
     handler = logging.StreamHandler()
     formatter = logging.Formatter(
-        "%(asctime)s %(name)s [%(levelname)s] %(message)s",
+        "%(asctime)s %(name)s %(lineno)s [%(levelname)s] %(message)s",
         datefmt='%Y/%m/%d %H:%M:%S'
     )
     handler.setFormatter(formatter)
@@ -120,41 +127,39 @@ def main():
     is_send_mail = args.mail
     is_gen_pdf = args.pdf
     is_login = args.login
-    session_path = None
-    if args.session_path:
-        session_path = os.path.abspath(args.session_path)
+    is_single_image = args.single_image
+    quality = args.quality
+    session_path = args.session_path
+    cookies_path = args.cookies_path
+
     loglevel = logging.DEBUG if args.debug else logging.INFO
     init_logger(level=loglevel)
 
     if args.mail:
-        Mail.init(args.config)
+        mail = Mail.init(args.config)
+
+    comicbook = ComicBook(site=site, comicid=comicid)
+    if args.proxy:
+        SessionMgr.set_proxy(site=site, proxy=args.proxy)
     if args.noverify:
-        image_cache.set_verify(verify=False)
-
-    image_cache.DEFAULT_POOL_SIZE = args.worker
-    if args.nocache or site == 'bilibili':
-        image_cache.IS_USE_CACHE = False
-    else:
-        image_cache.IS_USE_CACHE = True
-
-    image_cache.set_cache_dir(args.cachedir)
-
-    default_comicid = {
-        "qq": "505430",  # 海贼王
-        "u17": "195",    # 雏蜂
-        "bilibili": "mc24742",   # 海贼王
-    }
-    comicid = comicid or default_comicid.get(site)
-    comicbook = ComicBook.create_comicbook(site=site, comicid=comicid)
+        comicbook.image_downloader.set_verify(verify=False)
+    WorkerPoolMgr.set_worker(worker=args.worker)
     comicbook.crawler.DRIVER_PATH = args.driver_path
+
     # 加载 session
     if session_path and os.path.exists(session_path):
-        comicbook.crawler.load_session(session_path)
+        SessionMgr.load_session(site=site, path=session_path)
+        logger.info('load session success. %s', session_path)
+
+    # 加载cookies
+    if cookies_path and os.path.exists(cookies_path):
+        SessionMgr.load_cookies(site=site, path=cookies_path)
+        logger.info('load cookies success. %s', cookies_path)
 
     if args.name:
-        result = comicbook.search(site=args.site, name=args.name, limit=10)
+        result = comicbook.search(name=args.name, limit=10)
         for item in result:
-            print("name={}\tcomicid={}\tsource_url={}".format(item.name, item.comicid, item.source_url))
+            print("comicid={}\tname={}\tsource_url={}".format(item.comicid, item.name, item.source_url))
         comicid = input("请输入要下载的comicid: ")
         comicbook.crawler.comicid = comicid
 
@@ -162,7 +167,6 @@ def main():
 
     if is_login:
         comicbook.crawler.login()
-
     comicbook.start_crawler()
     msg = ("{source_name} 【{name}】 更新至: {last_chapter_number:>03} "
            "【{last_chapter_title}】 数据来源: {source_url}").format(
@@ -181,26 +185,33 @@ def main():
             chapter = comicbook.Chapter(chapter_number)
             logger.info("正在下载 【{}】 {} 【{}】".format(
                 comicbook.name, chapter.chapter_number, chapter.title))
+
+            chapter_dir = chapter.save(output_dir=output_dir)
+            logger.info("下载成功 %s", chapter_dir)
+            if is_single_image:
+                img_path = chapter.save_as_single_image(output_dir=output_dir, quality=quality)
+                logger.info("下载成功 %s", img_path)
             if is_gen_pdf or is_send_mail:
                 pdf_path = chapter.save_as_pdf(output_dir=output_dir)
                 if is_send_mail:
-                    Mail.send(subject=os.path.basename(pdf_path),
+                    mail.send(subject=os.path.basename(pdf_path),
                               content=None,
                               file_list=[pdf_path, ])
                 logger.info("下载成功 %s", pdf_path)
-            else:
-                chapter_dir = chapter.save(output_dir=output_dir)
-                logger.info("下载成功  %s", chapter_dir)
         except Exception as e:
             logger.exception(e)
 
     # 保存 session
     if session_path:
-        os.makedirs(os.path.dirname(session_path), exist_ok=True)
-        comicbook.crawler.export_session(session_path)
-        logger.info("session保存在: {}".format(session_path))
+        ensure_file_dir_exists(session_path)
+        SessionMgr.export_session(site=site, path=session_path)
+        logger.info("session saved. path={}".format(session_path))
 
-    image_cache.auto_clean()
+    # 保存 cookies
+    if cookies_path:
+        ensure_file_dir_exists(cookies_path)
+        SessionMgr.export_cookies(site=site, path=cookies_path)
+        logger.info("cookies saved. path={}".format(cookies_path))
 
 
 if __name__ == '__main__':
